@@ -1,0 +1,252 @@
+# Import libraries
+from tensorflow import keras
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.preprocessing import image
+from tensorflow.keras.applications.inception_resnet_v2 import InceptionResNetV2, preprocess_input
+from tensorflow.keras.layers import Dense, Flatten, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+import numpy as np
+import random
+import os
+import shutil
+import matplotlib.pyplot as plt
+import pickle
+from sklearn.metrics import classification_report, confusion_matrix
+import itertools
+
+# Data preparation
+data_dir = '/kaggle/input/garbage-classification-v2/garbage-dataset'
+classes = ['metal', 'glass', 'biological', 'paper', 'battery', 'trash', 'cardboard', 'shoes', 'clothes', 'plastic']
+
+# Create train/test directories (75% train, 25% test)
+rootdir1 = './Train-TestSplit/'
+for cls in classes:
+    os.makedirs(rootdir1 + 'train/' + cls, exist_ok=True)
+    os.makedirs(rootdir1 + 'test/' + cls, exist_ok=True)
+    
+    source = os.path.join(data_dir, cls)
+    all_files = os.listdir(source)
+    np.random.shuffle(all_files)
+    
+    split_idx = int(len(all_files) * 0.75)
+    train_files, test_files = all_files[:split_idx], all_files[split_idx:]
+    
+    for f in train_files:
+        shutil.copy(os.path.join(source, f), os.path.join(rootdir1, 'train', cls, f))
+    for f in test_files:
+        shutil.copy(os.path.join(source, f), os.path.join(rootdir1, 'test', cls, f))
+
+# Define constants
+IMG_SIZE = (299, 299)
+BATCH_SIZE = 32
+CLASSES = ['battery', 'biological', 'cardboard', 'clothes', 'glass', 
+           'metal', 'paper', 'plastic', 'shoes', 'trash']
+
+# Data generators
+train_datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_input,
+    rotation_range=20,
+    width_shift_range=0.2,
+    shear_range=0.2,
+    zoom_range=0.2,
+    horizontal_flip=True,
+    validation_split=0.2
+)
+
+train_generator = train_datagen.flow_from_directory(
+    './Train-TestSplit/train',
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    classes=CLASSES,
+    subset='training'
+)
+
+validation_generator = train_datagen.flow_from_directory(
+    './Train-TestSplit/train',
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    classes=CLASSES,
+    subset='validation'
+)
+
+test_generator = ImageDataGenerator(
+    preprocessing_function=preprocess_input
+).flow_from_directory(
+    './Train-TestSplit/test',
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
+    classes=CLASSES,
+    shuffle=False
+)
+
+# Model creation
+base_model = InceptionResNetV2(
+    weights='imagenet',
+    include_top=False,
+    input_shape=(299, 299, 3)
+)
+
+# Freeze base layers
+base_model.trainable = False
+
+# Custom head for 10 classes
+x = Flatten()(base_model.output)
+x = Dense(512, activation='relu')(x)
+x = Dropout(0.5)(x)
+output = Dense(10, activation='softmax')(x)
+
+model = Model(base_model.input, output)
+model.compile(optimizer=Adam(learning_rate=0.001),
+              loss='categorical_crossentropy', 
+              metrics=['accuracy'])
+
+model.summary()
+
+# Training setup
+nb_train_samples = train_generator.samples
+nb_validation_samples = validation_generator.samples
+epochs = 20
+
+# Enhanced Callbacks
+callbacks_list = [
+    keras.callbacks.ModelCheckpoint(
+        filepath='garbage_classifier_10class.keras',
+        monitor='val_accuracy',
+        save_best_only=True,
+        mode='max',
+        verbose=1),
+    
+    keras.callbacks.EarlyStopping(
+        monitor='val_accuracy',
+        patience=7,
+        mode='max',
+        restore_best_weights=True,
+        verbose=1),
+    
+    keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.2,
+        patience=3,
+        min_lr=1e-6,
+        verbose=1)
+]
+
+# Training
+history = model.fit(
+    train_generator,
+    steps_per_epoch=max(1, nb_train_samples // BATCH_SIZE),
+    epochs=epochs,
+    callbacks=callbacks_list,
+    validation_data=validation_generator,
+    validation_steps=max(1, nb_validation_samples // BATCH_SIZE),
+    verbose=1
+)
+
+# Save the final model
+model.save('final_garbage_classifier.h5')
+print("Training completed and model saved!")
+
+# Plot training history
+history_dict = history.history
+loss_values = history_dict['loss']
+val_loss_values = history_dict['val_loss']
+
+epochs_x = range(1, len(loss_values) + 1)
+plt.figure(figsize=(6,6))
+plt.plot(epochs_x, loss_values, 'r', label='Training loss')
+plt.plot(epochs_x, val_loss_values, 'b', label='Validation loss')
+plt.title('Training and validation Loss and Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.savefig('EpochVsLoss.jpg', dpi=300, bbox_inches='tight')
+plt.show()
+
+plt.figure(figsize=(6,6))
+acc_values = history_dict['accuracy']
+val_acc_values = history_dict['val_accuracy']
+plt.plot(epochs_x, acc_values, 'r', label='Training acc')
+plt.plot(epochs_x, val_acc_values, 'b', label='Validation acc')
+plt.title('Training and validation accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Acc')
+plt.legend()
+plt.savefig('EpochVsAcc.jpg', dpi=300, bbox_inches='tight')
+plt.show()
+
+# Evaluation
+score = model.evaluate(train_generator)
+print('Train loss:', score[0])
+print('Train accuracy:', score[1])
+
+score = model.evaluate(validation_generator)
+print('Val loss:', score[0])
+print('Val accuracy:', score[1])
+
+# Save class labels
+labels = train_generator.class_indices
+classes1 = {}
+for key, value in labels.items():
+    classes1[value] = key.capitalize()
+
+with open('classes.pkl', 'wb') as file:
+    pickle.dump(classes1, file)
+print('Saved classes to disk!')
+
+# Confusion matrix and classification report
+def plot_confusion_matrix(cm, classes, normalize=True, title='Confusion matrix', cmap=plt.cm.Blues):
+    plt.figure(figsize=(10,10))
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        cm = np.around(cm, decimals=2)
+        cm[np.isnan(cm)] = 0.0
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, cm[i, j],
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+    plt.savefig('Conf.jpg', dpi=300, bbox_inches='tight')
+
+# Predictions
+Y_pred = model.predict(test_generator)
+y_pred = np.argmax(Y_pred, axis=1)
+target_names = CLASSES
+
+# Confusion Matrix
+cm = confusion_matrix(test_generator.classes, y_pred)
+plot_confusion_matrix(cm, target_names, normalize=False, title='Confusion Matrix')
+
+# Classification Report
+print('Classification Report')
+print(classification_report(test_generator.classes, y_pred, target_names=target_names))
+
+# Single image prediction example
+img_path = "/kaggle/working/test/plastic/plastic_1008.jpg"
+img = image.load_img(img_path, target_size=(299,299))
+plt.imshow(img)
+plt.show()
+
+img_array = image.img_to_array(img)
+img_batch = np.expand_dims(img_array, axis=0)
+img_preprocessed = preprocess_input(img_batch)
+
+pred = model.predict(img_preprocessed)
+pred1 = np.argmax(pred, axis=1)
+
+with open('./classes.pkl', 'rb') as file:
+    classes_p = pickle.load(file)
+
+print(classes_p[pred1[0]])
